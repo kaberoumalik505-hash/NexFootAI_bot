@@ -25,7 +25,12 @@ FORCED_TEAM_IDS = {
     "real madrid": 541,
     "real": 541,
     "psg": 85,
-    "paris": 85
+    "paris": 85,
+    "argentine": 7,
+    "argentina": 7,
+    "bresil": 6,
+    "france": 2,
+    "burkina faso": 1121
 }
 
 def poisson_prob(lmbda, k):
@@ -35,11 +40,11 @@ def poisson_prob(lmbda, k):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "⚽ **FOOTBALL PREDICTOR AI – V9**\n\n"
-        "Analyse complète, prédictions avancées (Buts, Corners, Cartons, Mi-temps).\n\n"
+        "⚽ **FOOTBALL PREDICTOR AI – V10**\n\n"
+        "Calendrier des matchs à venir & pronostics avancés.\n\n"
         "**Commandes :**\n"
         "• `/today` — Matchs du jour (1, 2, 3...)\n"
-        "• `/search <équipe>` — Recherche sur toute la saison (ex: `/search barca`)\n"
+        "• `/search <équipe>` — Matchs à venir de la saison (ex: `/search argentine` ou `/search barca`)\n"
         "• `/predict <N°>` — Analyse complète d'un match"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -76,10 +81,11 @@ async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Veuillez indiquer un nom d'équipe. Exemple : `/search barca`", parse_mode="Markdown")
+        await update.message.reply_text("Veuillez indiquer un nom d'équipe. Exemple : `/search argentine` ou `/search barca`", parse_mode="Markdown")
         return
 
     raw_query = " ".join(context.args).strip().lower()
+    current_year = datetime.date.today().year
 
     try:
         team_id = None
@@ -87,7 +93,7 @@ async def search_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if raw_query in FORCED_TEAM_IDS:
             team_id = FORCED_TEAM_IDS[raw_query]
-            team_name = "FC Barcelona" if "barc" in raw_query else raw_query.capitalize()
+            team_name = raw_query.capitalize()
         else:
             team_url = f"https://v3.football.api-sports.io/teams?search={raw_query}"
             team_resp = requests.get(team_url, headers=HEADERS, timeout=15).json()
@@ -100,48 +106,49 @@ async def search_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Aucune équipe trouvée pour : *{raw_query}*.", parse_mode="Markdown")
             return
 
-        fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}"
-        fix_resp = requests.get(fix_url, headers=HEADERS, timeout=15).json()
-        fixtures = fix_resp.get("response", [])
-
-        if not fixtures:
-            for s in [2026, 2025, 2024]:
-                f_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&season={s}"
-                f_resp = requests.get(f_url, headers=HEADERS, timeout=15).json()
-                items = f_resp.get("response", [])
-                if items:
-                    fixtures.extend(items)
+        # Récupérer les matchs de la saison en cours et de la saison active
+        fixtures = []
+        for s in [current_year, current_year - 1]:
+            f_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&season={s}"
+            f_resp = requests.get(f_url, headers=HEADERS, timeout=15).json()
+            items = f_resp.get("response", [])
+            if items:
+                fixtures.extend(items)
 
         if not fixtures:
             await update.message.reply_text(f"Aucun match trouvé pour {team_name} dans l'API.")
             return
 
-        seen_ids = set()
-        unique_fixtures = []
-        for f in fixtures:
-            fid = f["fixture"]["id"]
-            if fid not in seen_ids:
-                seen_ids.add(fid)
-                unique_fixtures.append(f)
+        # Filtrer / Trier pour afficher en priorité les matchs à venir (Not Started - 'NS')
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        
+        upcoming = [f for f in fixtures if f["fixture"]["date"][:10] >= today_str]
+        upcoming.sort(key=lambda x: x["fixture"]["date"]) # Chronologique pour les matchs à venir
 
-        unique_fixtures.sort(key=lambda x: x["fixture"]["date"], reverse=True)
-        context.user_data["search_fixtures"] = unique_fixtures[:25]
+        past = [f for f in fixtures if f["fixture"]["date"][:10] < today_str]
+        past.sort(key=lambda x: x["fixture"]["date"], reverse=True) # Du plus récent au plus ancien pour l'historique
 
-        msg = f"🔍 **Matchs de la saison — {team_name}**\n\n"
-        for idx, f in enumerate(unique_fixtures[:25], start=1):
+        # On combine : d'abord les matchs à venir, puis le reste si besoin (limité à 25)
+        combined_fixtures = upcoming + past
+        context.user_data["search_fixtures"] = combined_fixtures[:25]
+
+        msg = f"📅 **Calendrier / Matchs — {team_name}**\n\n"
+        for idx, f in enumerate(combined_fixtures[:25], start=1):
             f_date = f["fixture"]["date"][:10]
+            f_time = f["fixture"]["date"][11:16]
             league = f["league"]["name"]
             home = f["teams"]["home"]["name"]
             away = f["teams"]["away"]["name"]
             status = f["fixture"]["status"]["short"]
             
+            status_icon = "⏳" if status == "NS" else "✅"
             score_str = ""
             if status in ["FT", "AET", "PEN"]:
                 gh = f["goals"]["home"]
                 ga = f["goals"]["away"]
                 score_str = f" | **{gh}-{ga}**"
 
-            msg += f"**{idx}.** 📅 {f_date} | {league}{score_str}\n   🏠 {home} 🆚 ✈️ {away}\n\n"
+            msg += f"**{idx}.** {status_icon} {f_date} ({f_time}) | {league}{score_str}\n   🏠 {home} 🆚 ✈️ {away}\n\n"
 
         msg += "Pour analyser un match : `/predict 1`"
         await update.message.reply_text(msg, parse_mode="Markdown")
@@ -245,7 +252,7 @@ def main():
     app.add_handler(CommandHandler("search", search_team))
     app.add_handler(CommandHandler("predict", predict_match))
 
-    print("Le bot V9 est en route...")
+    print("Le bot V10 est en route...")
     app.run_polling()
 
 if __name__ == "__main__":
