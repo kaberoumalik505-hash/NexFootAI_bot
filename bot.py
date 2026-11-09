@@ -10,7 +10,6 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Récupération des clés depuis les variables d'environnement
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY")
 
@@ -19,34 +18,31 @@ HEADERS = {
     "x-rapidapi-host": "v3.football.api-sports.io"
 }
 
-# Dictionnaire d'alias pour les recherches fréquentes et diminutifs
-TEAM_ALIASES = {
-    "barca": "Barcelona",
-    "barça": "Barcelona",
-    "real": "Real Madrid",
-    "man utd": "Manchester United",
-    "man city": "Manchester City",
-    "psg": "Paris Saint Germain",
-    "inter": "Inter",
-    "juve": "Juventus",
-    "bayern": "Bayern Munich"
+# Dictionnaire forcé pour garantir l'accès direct aux grands clubs sans erreur de l'API
+FORCED_TEAM_IDS = {
+    "barca": 529,
+    "barça": 529,
+    "fc barcelona": 529,
+    "barcelona": 529,
+    "real madrid": 541,
+    "real": 541,
+    "psg": 85,
+    "paris": 85
 }
 
 def poisson_prob(lmbda, k):
-    """Calcule la probabilité de k buts selon la loi de Poisson de paramètre lmbda."""
     if lmbda < 0:
         return 0.0
     return (math.exp(-lmbda) * (lmbda ** k)) / math.factorial(k)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "⚽ **FOOTBALL PREDICTOR AI – V6 (PRO)**\n\n"
-        "Analyse complète, recherche robuste sur toute la saison et statistiques avancées.\n\n"
+        "⚽ **FOOTBALL PREDICTOR AI – V7**\n\n"
+        "Analyse complète, prédictions avancées (Buts, Corners, Cartons, Mi-temps).\n\n"
         "**Commandes :**\n"
-        "• `/today` — Liste des matchs du jour (1, 2, 3...)\n"
-        "• `/search <équipe>` — Recherche tous les matchs d'une équipe\n"
-        "• `/predict <N°>` — Analyse complète (Scores, Buts, Corners, Cartons, Mi-temps)\n"
-        "• `/help` — Aide"
+        "• `/today` — Matchs du jour (1, 2, 3...)\n"
+        "• `/search <équipe>` — Recherche sur toute la saison (ex: `/search barca`)\n"
+        "• `/predict <N°>` — Analyse complète d'un match"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -82,29 +78,36 @@ async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Veuillez indiquer un nom d'équipe. Exemple : `/search FC Barcelona`", parse_mode="Markdown")
+        await update.message.reply_text("Veuillez indiquer un nom d'équipe. Exemple : `/search barca`", parse_mode="Markdown")
         return
 
+    # Récupération complète de tous les mots saisis après /search
     raw_query = " ".join(context.args).strip().lower()
-    search_query = TEAM_ALIASES.get(raw_query, raw_query)
     current_year = datetime.date.today().year
 
     try:
-        # Étape 1 : Trouver l'ID de l'équipe
-        team_url = f"https://v3.football.api-sports.io/teams?search={search_query}"
-        team_resp = requests.get(team_url, headers=HEADERS, timeout=10).json()
-        teams = team_resp.get("response", [])
+        team_id = None
+        team_name = raw_query.capitalize()
 
-        if not teams:
+        # Vérifier si l'équipe est dans notre dictionnaire forcé
+        if raw_query in FORCED_TEAM_IDS:
+            team_id = FORCED_TEAM_IDS[raw_query]
+        else:
+            # Sinon, recherche classique via l'API
+            team_url = f"https://v3.football.api-sports.io/teams?search={raw_query}"
+            team_resp = requests.get(team_url, headers=HEADERS, timeout=10).json()
+            teams = team_resp.get("response", [])
+            if teams:
+                team_id = teams[0]["team"]["id"]
+                team_name = teams[0]["team"]["name"]
+
+        if not team_id:
             await update.message.reply_text(f"Aucune équipe trouvée pour : *{raw_query}*.", parse_mode="Markdown")
             return
 
-        team_id = teams[0]["team"]["id"]
-        team_name = teams[0]["team"]["name"]
-
-        # Étape 2 : Récupérer tous les matchs (Saison actuelle et précédentes pour élargir)
+        # Récupération des matchs de la saison sur l'API avec l'ID officiel
         fixtures = []
-        for season in [current_year, current_year - 1, current_year - 2]:
+        for season in [current_year, current_year - 1]:
             fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&season={season}"
             fix_resp = requests.get(fix_url, headers=HEADERS, timeout=10).json()
             items = fix_resp.get("response", [])
@@ -115,7 +118,7 @@ async def search_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Aucun match trouvé pour {team_name} dans l'API.")
             return
 
-        # Dédoublonner par ID et trier par date
+        # Dédoublonner et trier
         seen_ids = set()
         unique_fixtures = []
         for f in fixtures:
@@ -127,7 +130,7 @@ async def search_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
         unique_fixtures.sort(key=lambda x: x["fixture"]["date"], reverse=True)
         context.user_data["search_fixtures"] = unique_fixtures[:30]
 
-        msg = f"🔍 **Historique / Matchs — {team_name}**\n\n"
+        msg = f"🔍 **Matchs de la saison — {team_name}**\n\n"
         for idx, f in enumerate(unique_fixtures[:30], start=1):
             f_date = f["fixture"]["date"][:10]
             league = f["league"]["name"]
@@ -183,7 +186,6 @@ async def predict_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     away_team = match["teams"]["away"]["name"]
     league_name = match["league"]["name"]
 
-    # Paramètres de Poisson pour les buts
     lambda_home = 1.45
     lambda_away = 1.15
 
@@ -207,11 +209,9 @@ async def predict_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     best_h, best_a, _ = top_scores[0]
 
-    # Statistiques avancées calculées
     total_xG = lambda_home + lambda_away
     over_2_5 = sum(p for h, a, p in score_probs if (h + a) > 2.5) * 100
     under_2_5 = 100 - over_2_5
-
     ht_total = (lambda_home + lambda_away) * 0.45
     est_corners = round((lambda_home + lambda_away) * 4.2 + 3.5)
     est_yellows = round((lambda_home + lambda_away) * 1.8 + 2.1)
@@ -248,9 +248,9 @@ def main():
     app.add_handler(CommandHandler("search", search_team))
     app.add_handler(CommandHandler("predict", predict_match))
 
-    print("Le bot V6 est en route...")
+    print("Le bot V7 est en route...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-        
+            
