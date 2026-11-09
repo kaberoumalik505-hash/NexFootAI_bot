@@ -19,20 +19,31 @@ HEADERS = {
     "x-rapidapi-host": "v3.football.api-sports.io"
 }
 
+TEAM_ALIASES = {
+    "barca": "Barcelona",
+    "barça": "Barcelona",
+    "real": "Real Madrid",
+    "man utd": "Manchester United",
+    "man city": "Manchester City",
+    "psg": "Paris Saint Germain",
+    "inter": "Inter",
+    "juve": "Juventus",
+    "bayern": "Bayern Munich"
+}
+
 def poisson_prob(lmbda, k):
-    """Calcule la probabilité de k buts selon la loi de Poisson de paramètre lmbda."""
     if lmbda < 0:
         return 0.0
     return (math.exp(-lmbda) * (lmbda ** k)) / math.factorial(k)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "⚽ **FOOTBALL PREDICTOR AI – V3**\n\n"
+        "⚽ **FOOTBALL PREDICTOR AI – V5**\n\n"
         "Je t'aide à analyser les matchs et calculer les scores exacts.\n\n"
         "**Commandes disponibles :**\n"
-        "• `/today` — Liste les matchs du jour avec index simples (1, 2, 3...)\n"
-        "• `/search <équipe>` — Recherche les matchs de la saison d'une équipe/sélection\n"
-        "• `/predict <N°>` — Analyse un match (ex: `/predict 1`) avec image & scores exacts\n"
+        "• `/today` — Liste les matchs du jour (1, 2, 3...)\n"
+        "• `/search <équipe>` — Recherche un club (ex: `/search FC Barcelona`)\n"
+        "• `/predict <N°>` — Analyse complète d'un match (ex: `/predict 1`)\n"
         "• `/help` — Aide"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -51,7 +62,6 @@ async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Aucun match trouvé pour aujourd'hui ({today_date}).")
             return
 
-        # Sauvegarder la liste des matchs dans user_data avec des index 1, 2, 3...
         context.user_data["today_fixtures"] = fixtures[:30]
         
         msg = f"⚽ **Matchs du {today_date} — {len(fixtures)} rencontre(s)**\n\n"
@@ -62,7 +72,7 @@ async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
             away = f["teams"]["away"]["name"]
             msg += f"**{idx}.** 🕒 {time_str} | {league}\n   🏠 {home} 🆚 ✈️ {away}\n\n"
 
-        msg += "Pour analyser un match : `/predict 1` (choisissez le numéro dans la liste)"
+        msg += "Pour analyser un match : `/predict 1`"
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Erreur API: {e}")
@@ -70,43 +80,41 @@ async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Veuillez indiquer un nom d'équipe. Exemple : `/search Real`", parse_mode="Markdown")
+        await update.message.reply_text("Veuillez indiquer un nom d'équipe. Exemple : `/search FC Barcelona`", parse_mode="Markdown")
         return
 
-    query = " ".join(context.args).strip()
+    # CORRECTION : On rejoint tous les arguments pour garder les espaces (ex: "FC Barcelona")
+    raw_query = " ".join(context.args).strip().lower()
+    search_query = TEAM_ALIASES.get(raw_query, raw_query)
     
-    # Étape 1 : Chercher l'ID de l'équipe / sélection nationale
-    team_url = f"https://v3.football.api-sports.io/teams?search={query}"
+    current_year = datetime.date.today().year
+    
     try:
+        team_url = f"https://v3.football.api-sports.io/teams?search={search_query}"
         team_resp = requests.get(team_url, headers=HEADERS, timeout=10).json()
         teams = team_resp.get("response", [])
 
-        if not teams:
-            await update.message.reply_text(f"Aucune équipe trouvée pour : *{query}*.", parse_mode="Markdown")
-            return
+        team_id = None
+        team_name = search_query.capitalize()
 
-        team_info = teams[0]["team"]
-        team_id = team_info["id"]
-        team_name = team_info["name"]
-        team_logo = team_info["logo"]
+        if teams:
+            team_info = teams[0]["team"]
+            team_id = team_info["id"]
+            team_name = team_info["name"]
 
-        # Étape 2 : Récupérer tous les matchs de la saison pour cette équipe
-        current_year = datetime.date.today().year
-        fixtures_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&season={current_year}"
-        fix_resp = requests.get(fixtures_url, headers=HEADERS, timeout=10).json()
-        fixtures = fix_resp.get("response", [])
-
-        if not fixtures:
-            # Essayer la saison précédente si la saison en cours est vide
-            fixtures_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&season={current_year - 1}"
-            fix_resp = requests.get(fixtures_url, headers=HEADERS, timeout=10).json()
-            fixtures = fix_resp.get("response", [])
+        fixtures = []
+        if team_id:
+            for season in [current_year, current_year - 1]:
+                fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&season={season}"
+                fix_resp = requests.get(fix_url, headers=HEADERS, timeout=10).json()
+                fixtures = fix_resp.get("response", [])
+                if fixtures:
+                    break
 
         if not fixtures:
-            await update.message.reply_text(f"Aucun match trouvé pour {team_name} cette saison.")
+            await update.message.reply_text(f"Aucun match trouvé pour : *{raw_query}*.", parse_mode="Markdown")
             return
 
-        # Trier les matchs par date
         fixtures.sort(key=lambda x: x["fixture"]["date"])
         context.user_data["search_fixtures"] = fixtures[:25]
 
@@ -126,10 +134,8 @@ async def search_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             msg += f"**{idx}.** 📅 {f_date} | {league}{score_str}\n   🏠 {home} 🆚 ✈️ {away}\n\n"
 
-        msg += f"Pour prédire/analyser un match : `/predict 1` (choisissez l'index de la liste)."
-        
-        # Envoyer l'image/logo de l'équipe avec la liste des matchs
-        await update.message.reply_photo(photo=team_logo, caption=msg, parse_mode="Markdown")
+        msg += f"Pour analyser un match : `/predict 1`"
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Erreur recherche saison: {e}")
@@ -137,13 +143,12 @@ async def search_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def predict_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Utilisation : `/predict N°` (ex: `/predict 1` après un `/today` ou `/search`).", parse_mode="Markdown")
+        await update.message.reply_text("Utilisation : `/predict N°` (ex: `/predict 1`).", parse_mode="Markdown")
         return
 
     arg = context.args[0]
     match = None
 
-    # Tenter de récupérer depuis les index simplifiés (1, 2, 3...)
     if arg.isdigit():
         idx = int(arg) - 1
         if "search_fixtures" in context.user_data and 0 <= idx < len(context.user_data["search_fixtures"]):
@@ -151,7 +156,6 @@ async def predict_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif "today_fixtures" in context.user_data and 0 <= idx < len(context.user_data["today_fixtures"]):
             match = context.user_data["today_fixtures"][idx]
 
-    # Si ce n'est pas un index ou hors limite, chercher directement par ID API de match
     if not match:
         url = f"https://v3.football.api-sports.io/fixtures?id={arg}"
         try:
@@ -163,15 +167,13 @@ async def predict_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     if not match:
-        await update.message.reply_text("Match introuvable. Faites d'abord `/today` ou `/search <équipe>` puis tapez `/predict 1`.")
+        await update.message.reply_text("Match introuvable. Effectuez d'abord `/today` ou `/search <équipe>` puis tapez `/predict 1`.")
         return
 
     home_team = match["teams"]["home"]["name"]
     away_team = match["teams"]["away"]["name"]
-    home_logo = match["teams"]["home"]["logo"]
     league_name = match["league"]["name"]
 
-    # Modèle statistique de Poisson
     lambda_home = 1.45
     lambda_away = 1.15
 
@@ -195,7 +197,7 @@ async def predict_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     best_h, best_a, _ = top_scores[0]
 
-    caption = (
+    msg = (
         f"📊 **ANALYSE ET PRÉDICTION DU MATCH**\n\n"
         f"🏆 **{league_name}**\n"
         f"🏠 **{home_team}** 🆚 ✈️ **{away_team}**\n\n"
@@ -207,15 +209,11 @@ async def predict_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚽ **Top 4 Scores Exacts Probables :**\n"
     )
     for h, a, p in top_scores:
-        caption += f"• Score `{h} - {a}` ➔ **{(p*100):.1f}%** de chance\n"
+        msg += f"• Score `{h} - {a}` ➔ **{(p*100):.1f}%** de chance\n"
 
-    caption += "\n⚠️ *Calcul statistique basé sur la distribution de Poisson.*"
+    msg += "\n⚠️ *Calcul statistique basé sur la distribution de Poisson.*"
 
-    # Envoi de l'image du logo de l'équipe avec l'analyse complète
-    try:
-        await update.message.reply_photo(photo=home_logo, caption=caption, parse_mode="Markdown")
-    except Exception:
-        await update.message.reply_text(caption, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -225,9 +223,9 @@ def main():
     app.add_handler(CommandHandler("search", search_team))
     app.add_handler(CommandHandler("predict", predict_match))
 
-    print("Le bot V3 est en route...")
+    print("Le bot V5 est en route...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-                
+    
